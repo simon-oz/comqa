@@ -1,0 +1,169 @@
+Logging output to: logs/ensemble_decisions_20260806_110130.log
+==========================================================================================
+Multi-model decision ensemble
+==========================================================================================
+Loaded logreg: predictions/test_logreg_predictions.csv
+Loaded svm: predictions/test_svm_predictions.csv
+Loaded deberta: predictions/test_deberta_predictions.csv
+Loaded qwen: predictions/test_qwen2_5_14b_predictions.csv
+
+Models included in ensemble:
+  - logreg
+  - svm
+  - deberta
+  - qwen
+
+Evaluating individual models...
+==========================================================================================
+Individual model: logreg
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.81      0.83      0.82        69
+         comparison       1.00      0.92      0.96        25
+        aggregation       0.84      0.89      0.86        64
+ context_resolution       1.00      0.96      0.98        52
+           temporal       0.92      1.00      0.96        22
+     legal_citation       0.99      0.96      0.98       102
+evidence_extraction       0.92      0.92      0.92        24
+     multi_document       0.85      0.95      0.90        42
+            summary       0.80      1.00      0.89        20
+            analyze       0.88      0.86      0.87        58
+           evaluate       1.00      0.86      0.92        21
+          recommend       0.87      0.91      0.89        22
+
+          micro avg       0.90      0.92      0.91       521
+          macro avg       0.91      0.92      0.91       521
+       weighted avg       0.91      0.92      0.91       521
+        samples avg       0.91      0.92      0.90       521
+
+Hamming loss: 0.0495
+Exact match ratio: 0.5750
+F1 micro: 0.9094
+F1 macro: 0.9117
+F1 weighted: 0.9102
+F1 samples: 0.8965
+==========================================================================================
+Individual model: svm
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.83      0.87      0.85        69
+         comparison       1.00      0.92      0.96        25
+        aggregation       0.92      0.88      0.90        64
+ context_resolution       0.96      0.96      0.96        52
+           temporal       0.88      0.95      0.91        22
+     legal_citation       0.99      0.99      0.99       102
+evidence_extraction       0.85      0.92      0.88        24
+     multi_document       0.93      0.88      0.90        42
+            summary       0.94      0.85      0.89        20
+            analyze       0.92      0.79      0.85        58
+           evaluate       1.00      0.86      0.92        21
+          recommend       0.67      0.91      0.77        22
+
+          micro avg       0.91      0.90      0.91       521
+          macro avg       0.91      0.90      0.90       521
+       weighted avg       0.92      0.90      0.91       521
+        samples avg       0.92      0.90      0.90       521
+
+Hamming loss: 0.0495
+Exact match ratio: 0.6000
+F1 micro: 0.9084
+F1 macro: 0.8993
+F1 weighted: 0.9093
+F1 samples: 0.8962
+==========================================================================================
+Individual model: deberta
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.75      0.90      0.82        69
+         comparison       0.96      0.92      0.94        25
+        aggregation       0.93      0.86      0.89        64
+ context_resolution       1.00      0.94      0.97        52
+           temporal       1.00      0.86      0.93        22
+     legal_citation       0.97      0.99      0.98       102
+evidence_extraction       0.92      0.92      0.92        24
+     multi_document       0.70      1.00      0.82        42
+            summary       0.90      0.95      0.93        20
+            analyze       0.96      0.83      0.89        58
+           evaluate       0.85      0.52      0.65        21
+          recommend       0.84      0.95      0.89        22
+
+          micro avg       0.89      0.91      0.90       521
+          macro avg       0.90      0.89      0.89       521
+       weighted avg       0.90      0.91      0.90       521
+        samples avg       0.90      0.91      0.89       521
+
+Hamming loss: 0.0563
+Exact match ratio: 0.5375
+F1 micro: 0.8973
+F1 macro: 0.8853
+F1 weighted: 0.8979
+F1 samples: 0.8896
+==========================================================================================
+Individual model: qwen
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.86      0.90      0.88        69
+         comparison       1.00      0.96      0.98        25
+        aggregation       0.96      0.81      0.88        64
+ context_resolution       1.00      0.96      0.98        52
+           temporal       1.00      1.00      1.00        22
+     legal_citation       0.91      1.00      0.95       102
+evidence_extraction       0.96      0.92      0.94        24
+     multi_document       0.81      0.83      0.82        42
+            summary       0.95      0.95      0.95        20
+            analyze       0.84      0.88      0.86        58
+           evaluate       0.73      0.90      0.81        21
+          recommend       0.69      1.00      0.81        22
+
+          micro avg       0.89      0.92      0.91       521
+          macro avg       0.89      0.93      0.91       521
+       weighted avg       0.90      0.92      0.91       521
+        samples avg       0.91      0.92      0.89       521
+
+Hamming loss: 0.0521
+Exact match ratio: 0.5875
+F1 micro: 0.9057
+F1 macro: 0.9054
+F1 weighted: 0.9068
+F1 samples: 0.8941
+
+Normalized ensemble weights:
+  logreg     0.2500
+  svm        0.2500
+  deberta    0.2500
+  qwen       0.2500
+==========================================================================================
+Ensemble model
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.83      0.90      0.86        69
+         comparison       1.00      0.96      0.98        25
+        aggregation       0.92      0.91      0.91        64
+ context_resolution       1.00      1.00      1.00        52
+           temporal       0.92      1.00      0.96        22
+     legal_citation       0.99      1.00      1.00       102
+evidence_extraction       0.92      0.92      0.92        24
+     multi_document       0.79      0.98      0.87        42
+            summary       0.95      1.00      0.98        20
+            analyze       0.93      0.88      0.90        58
+           evaluate       1.00      0.90      0.95        21
+          recommend       0.78      0.95      0.86        22
+
+          micro avg       0.92      0.95      0.93       521
+          macro avg       0.92      0.95      0.93       521
+       weighted avg       0.92      0.95      0.93       521
+        samples avg       0.92      0.95      0.92       521
+
+Hamming loss: 0.0375
+Exact match ratio: 0.6687
+F1 micro: 0.9321
+F1 macro: 0.9317
+F1 weighted: 0.9332
+F1 samples: 0.9215
+
+Saved ensemble predictions: predictions/test_ensemble_predictions.csv

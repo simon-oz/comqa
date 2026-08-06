@@ -1,0 +1,88 @@
+Logging output to: logs/train_svm_20260806_100943.log
+==========================================================================================
+Linear SVM multi-label classifier
+==========================================================================================
+Loading training data from: data/train_dataset.jsonl
+Could not stratify by label combination. Using random train/dev split.
+Train size: 541
+Dev size: 96
+Loading test data from: data/test_dataset.jsonl
+Test size: 160
+Loading weights:   0%|                                                                                                                                       | 0/391 [00:00<?, ?it/s]Loading weights: 100%|###########################################################################################################################| 391/391 [00:00<00:00, 9293.84it/s]
+Embedding model: intfloat/e5-large-v2
+Encoding train texts: 541
+Batches:   0%|                                                                                                                                                 | 0/9 [00:00<?, ?it/s]Batches:  11%|###############2                                                                                                                         | 1/9 [00:00<00:02,  3.74it/s]Batches:  33%|#############################################6                                                                                           | 3/9 [00:00<00:00,  9.18it/s]Batches:  67%|###########################################################################################3                                             | 6/9 [00:00<00:00, 14.75it/s]Batches: 100%|#########################################################################################################################################| 9/9 [00:00<00:00, 15.37it/s]
+Encoding dev texts: 96
+Batches:   0%|                                                                                                                                                 | 0/2 [00:00<?, ?it/s]Batches: 100%|#########################################################################################################################################| 2/2 [00:00<00:00, 17.69it/s]Batches: 100%|#########################################################################################################################################| 2/2 [00:00<00:00, 17.65it/s]
+Encoding test texts: 160
+Batches:   0%|                                                                                                                                                 | 0/3 [00:00<?, ?it/s]Batches:  67%|###########################################################################################3                                             | 2/3 [00:00<00:00, 19.21it/s]Batches: 100%|#########################################################################################################################################| 3/3 [00:00<00:00, 23.76it/s]
+
+Training Linear SVM...
+==========================================================================================
+EVALUATION: Linear SVM dev
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.85      0.93      0.89        43
+         comparison       1.00      0.93      0.96        14
+        aggregation       1.00      0.74      0.85        38
+ context_resolution       0.97      1.00      0.98        28
+           temporal       0.93      1.00      0.96        13
+     legal_citation       0.98      0.98      0.98        65
+evidence_extraction       1.00      0.92      0.96        12
+     multi_document       0.89      0.84      0.86        19
+            summary       1.00      0.92      0.96        12
+            analyze       0.86      0.91      0.88        33
+           evaluate       0.86      0.67      0.75         9
+          recommend       0.75      1.00      0.86        15
+
+          micro avg       0.92      0.91      0.92       301
+          macro avg       0.92      0.90      0.91       301
+       weighted avg       0.93      0.91      0.92       301
+        samples avg       0.94      0.92      0.92       301
+
+Hamming loss: 0.0425
+Exact match ratio: 0.6250
+F1 micro: 0.9182
+F1 macro: 0.9081
+F1 weighted: 0.9172
+F1 samples: 0.9151
+Average precision micro: 0.9407
+Average precision macro: 0.9275
+Average precision weighted: 0.9396
+==========================================================================================
+EVALUATION: Linear SVM test
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.83      0.87      0.85        69
+         comparison       1.00      0.92      0.96        25
+        aggregation       0.92      0.88      0.90        64
+ context_resolution       0.96      0.96      0.96        52
+           temporal       0.88      0.95      0.91        22
+     legal_citation       0.99      0.99      0.99       102
+evidence_extraction       0.85      0.92      0.88        24
+     multi_document       0.93      0.88      0.90        42
+            summary       0.94      0.85      0.89        20
+            analyze       0.92      0.79      0.85        58
+           evaluate       1.00      0.86      0.92        21
+          recommend       0.67      0.91      0.77        22
+
+          micro avg       0.91      0.90      0.91       521
+          macro avg       0.91      0.90      0.90       521
+       weighted avg       0.92      0.90      0.91       521
+        samples avg       0.92      0.90      0.90       521
+
+Hamming loss: 0.0495
+Exact match ratio: 0.6000
+F1 micro: 0.9084
+F1 macro: 0.8993
+F1 weighted: 0.9093
+F1 samples: 0.8962
+Average precision micro: 0.9525
+Average precision macro: 0.9564
+Average precision weighted: 0.9526
+Saved model: artifacts/svm_ovr.joblib
+Saved thresholds: artifacts/svm_thresholds.npy
+Saved scaler: artifacts/svm_scaler.joblib
+Saved predictions: predictions/test_svm_predictions.csv

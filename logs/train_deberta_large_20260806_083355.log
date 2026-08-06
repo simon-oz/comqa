@@ -1,0 +1,52 @@
+Logging output to: logs/train_deberta_large_20260806_083355.log
+==========================================================================================
+DeBERTa-large multi-label classifier
+==========================================================================================
+CUDA available: True
+Loading training data from: data/train_dataset.jsonl
+Could not stratify by label combination. Using random train/dev split.
+Train size: 509
+Dev size: 128
+Loading test data from: data/test_dataset.jsonl
+Test size: 160
+Tokenizing train dataset...
+
+
+==========================================================================================
+DeBERTa test report using dev-tuned thresholds
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.75      0.90      0.82        69
+         comparison       0.96      0.92      0.94        25
+        aggregation       0.93      0.86      0.89        64
+ context_resolution       1.00      0.94      0.97        52
+           temporal       1.00      0.86      0.93        22
+     legal_citation       0.97      0.99      0.98       102
+evidence_extraction       0.92      0.92      0.92        24
+     multi_document       0.70      1.00      0.82        42
+            summary       0.90      0.95      0.93        20
+            analyze       0.96      0.83      0.89        58
+           evaluate       0.85      0.52      0.65        21
+          recommend       0.84      0.95      0.89        22
+
+          micro avg       0.89      0.91      0.90       521
+          macro avg       0.90      0.89      0.89       521
+       weighted avg       0.90      0.91      0.90       521
+        samples avg       0.90      0.91      0.89       521
+
+F1 micro: 0.8973
+F1 macro: 0.8853
+F1 weighted: 0.8979
+F1 samples: 0.8896
+Average precision micro: 0.9509
+Average precision macro: 0.9433
+Average precision weighted: 0.9477
+
+Writing model shards:   0%|                                                                                                                                                      | 0/1 [00:00<?, ?it/s]
+Writing model shards: 100%|##############################################################################################################################################| 1/1 [00:23<00:00, 23.31s/it]
+Writing model shards: 100%|##############################################################################################################################################| 1/1 [00:23<00:00, 23.31s/it]
+Saved model: deberta_large_multilabel/final
+Saved tokenizer: deberta_large_multilabel/final
+Saved thresholds: deberta_large_multilabel/dev_thresholds.npy
+Saved predictions: predictions/test_deberta_predictions.csv

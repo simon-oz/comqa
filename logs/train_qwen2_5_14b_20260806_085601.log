@@ -1,0 +1,52 @@
+Logging output to: logs/train_qwen2_5_14b_20260806_085601.log
+==========================================================================================
+Qwen2.5-14B-Instruct multi-label LoRA classifier
+==========================================================================================
+CUDA available: True
+GPU: NVIDIA H100 NVL
+BF16 supported: True
+Loading training data from: data/train_dataset.jsonl
+Train size: 507
+Dev size: 130
+Loading test data from: data/test_dataset.jsonl
+Test size: 160
+Tokenizing train dataset...
+
+Using BF16 LoRA without 4-bit quantization.
+
+==========================================================================================
+Qwen2.5-14B test report using dev-tuned thresholds
+==========================================================================================
+                     precision    recall  f1-score   support
+
+          retrieval       0.86      0.90      0.88        69
+         comparison       1.00      0.96      0.98        25
+        aggregation       0.96      0.81      0.88        64
+ context_resolution       1.00      0.96      0.98        52
+           temporal       1.00      1.00      1.00        22
+     legal_citation       0.91      1.00      0.95       102
+evidence_extraction       0.96      0.92      0.94        24
+     multi_document       0.81      0.83      0.82        42
+            summary       0.95      0.95      0.95        20
+            analyze       0.84      0.88      0.86        58
+           evaluate       0.73      0.90      0.81        21
+          recommend       0.69      1.00      0.81        22
+
+          micro avg       0.89      0.92      0.91       521
+          macro avg       0.89      0.93      0.91       521
+       weighted avg       0.90      0.92      0.91       521
+        samples avg       0.91      0.92      0.89       521
+
+Hamming loss: 0.0521
+Exact match ratio: 0.5875
+F1 micro: 0.9057
+F1 macro: 0.9054
+F1 weighted: 0.9068
+F1 samples: 0.8941
+Average precision micro: 0.9646
+Average precision macro: 0.9644
+Average precision weighted: 0.9624
+Saved model: qwen2_5_14b_multilabel/final
+Saved tokenizer: qwen2_5_14b_multilabel/final
+Saved thresholds: qwen2_5_14b_multilabel/dev_thresholds.npy
+Saved predictions: predictions/test_qwen2_5_14b_predictions.csv
