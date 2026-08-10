@@ -536,6 +536,7 @@ def report_with_threshold(
             preds,
             target_names=LABEL_COLS,
             zero_division=0,
+            digits=44
         )
     )
 

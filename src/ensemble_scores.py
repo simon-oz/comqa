@@ -409,6 +409,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray, title: str):
             y_pred,
             target_names=LABEL_COLS,
             zero_division=0,
+            digits=4
         )
     )
 

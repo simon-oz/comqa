@@ -1,4 +1,4 @@
-# src/train_logistic_regression.py
+# train_svm.py
 
 import atexit
 import json
@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 from joblib import dump
 from sklearn.base import clone
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -22,6 +21,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
 from sentence_transformers import SentenceTransformer
 
 warnings.filterwarnings("ignore")
@@ -48,7 +48,6 @@ LABEL_COLS = [
     "recommend",
 ]
 
-# The script will use the first training file that exists.
 TRAIN_CANDIDATES = [
     "data/train_dataset.txt",
     "train_dataset.txt",
@@ -56,14 +55,13 @@ TRAIN_CANDIDATES = [
     "train_dataset.jsonl",
 ]
 
-# External test dataset.
 TEST_PATH = "data/test_dataset.jsonl"
 
-# Embedding model.
-# You can change this to a larger model if needed.
 EMBEDDING_MODEL = "intfloat/e5-large-v2"
+# You can also try:
+# EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+# EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 
-# Dev split size.
 DEV_SIZE = 0.15
 SEED = 42
 
@@ -85,20 +83,20 @@ class StreamTee:
     Writes output to both the original stream and a log file.
     """
 
+    @staticmethod
+    def _to_text(message):
+        if isinstance(message, bytes):
+            return message.decode("utf-8", errors="ignore")
+        return str(message)
+
     def __init__(self, original_stream, log_file):
         self.original_stream = original_stream
         self.log_file = log_file
 
     def write(self, message):
-        try:
-            self.original_stream.write(message)
-        except TypeError:
-            self.original_stream.write(message.decode("utf-8", errors="ignore"))
-
-        try:
-            self.log_file.write(message)
-        except TypeError:
-            self.log_file.write(message.decode("utf-8", errors="ignore"))
+        text = self._to_text(message)
+        self.original_stream.write(text)
+        self.log_file.write(text)
 
     def flush(self):
         self.original_stream.flush()
@@ -113,7 +111,7 @@ class StreamTee:
 
 def setup_output_logging():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOG_DIR / f"train_logistic_regression_{timestamp}.log"
+    log_path = LOG_DIR / f"train_svm_{timestamp}.log"
 
     log_file = open(log_path, "a", encoding="utf-8")
 
@@ -138,8 +136,7 @@ def find_train_path() -> str:
 
     raise FileNotFoundError(
         "Could not find training dataset. "
-        "Please place it at data/train_dataset.txt, train_dataset.txt, "
-        "data/train_dataset.jsonl, or train_dataset.jsonl."
+        "Please place it at data/train_dataset.txt or train_dataset.txt."
     )
 
 
@@ -160,11 +157,8 @@ def load_jsonl(path: str):
 
     has_labels = all(col in df.columns for col in LABEL_COLS)
 
-    # ========================================================
-    # SURGICAL FIX:
-    # Some labels, especially `retrieval`, contain values like 2.
-    # For multi-label binary classification, convert any value > 0 to 1.
-    # ========================================================
+    # Fill missing labels and binarize all labels.
+    # Values like retrieval=2 are treated as positive, i.e. 1.
     for col in LABEL_COLS:
         if col not in df.columns:
             df[col] = 0
@@ -187,8 +181,6 @@ def split_train_dev(df: pd.DataFrame, dev_size: float = DEV_SIZE, seed: int = SE
     The external test_dataset.jsonl is used separately.
     """
     texts = df[TEXT_COL].astype(str).to_numpy()
-
-    # SURGICAL FIX: ensure labels are binary before splitting.
     y = (df[LABEL_COLS].to_numpy() > 0).astype(int)
 
     # Try to stratify by exact multi-label combination.
@@ -257,7 +249,7 @@ class SafeOneVsRestClassifier:
 
         return self
 
-    def scores(self, X, prefer_proba: bool = True):
+    def scores(self, X, prefer_proba: bool = False):
         n_samples = X.shape[0]
         score_columns = []
 
@@ -331,7 +323,7 @@ def embed_texts(train_texts, dev_texts, test_texts):
     X_train = embedder.encode(
         train_texts,
         batch_size=64,
-        show_progress_bar=False,
+        show_progress_bar=True,
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
@@ -340,7 +332,7 @@ def embed_texts(train_texts, dev_texts, test_texts):
     X_dev = embedder.encode(
         dev_texts,
         batch_size=64,
-        show_progress_bar=False,
+        show_progress_bar=True,
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
@@ -349,7 +341,7 @@ def embed_texts(train_texts, dev_texts, test_texts):
     X_test = embedder.encode(
         test_texts,
         batch_size=64,
-        show_progress_bar=False,
+        show_progress_bar=True,
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
@@ -372,15 +364,14 @@ def embed_texts(train_texts, dev_texts, test_texts):
 # ============================================================
 
 def optimize_thresholds(y_true: np.ndarray, scores: np.ndarray) -> np.ndarray:
-    # SURGICAL FIX: ensure labels are strictly binary.
+    # Ensure labels are strictly binary.
     y_true = (np.asarray(y_true) > 0).astype(int)
 
     thresholds = np.zeros(y_true.shape[1], dtype=float)
 
     for label_idx in range(y_true.shape[1]):
         col = y_true[:, label_idx]
-        s = np.asarray(scores[:, label_idx], dtype=float)
-        s = np.nan_to_num(s, nan=-1e9)
+        s = scores[:, label_idx]
 
         if len(s) == 0:
             thresholds[label_idx] = 0.5
@@ -430,7 +421,6 @@ def evaluate_predictions(
     threshold=None,
     dataset_name: str = "",
 ):
-    # SURGICAL FIX: ensure labels are strictly binary.
     y_true = (np.asarray(y_true) > 0).astype(int)
 
     if threshold is None:
@@ -472,12 +462,7 @@ def evaluate_predictions(
 # Prediction saving
 # ============================================================
 
-def save_predictions(
-    df: pd.DataFrame,
-    preds: np.ndarray,
-    path: Path,
-    include_true_labels: bool = True,
-):
+def save_predictions(df: pd.DataFrame, preds: np.ndarray, path: Path):
     out = df.copy()
 
     for i, col in enumerate(LABEL_COLS):
@@ -491,9 +476,8 @@ def save_predictions(
     keep_cols.append(TEXT_COL)
     keep_cols.extend([f"pred_{col}" for col in LABEL_COLS])
 
-    # Include true labels only if they were actually provided.
-    if include_true_labels:
-        keep_cols.extend([col for col in LABEL_COLS if col in out.columns])
+    # Include true labels if they exist.
+    keep_cols.extend([col for col in LABEL_COLS if col in out.columns])
 
     # Remove duplicates while preserving order.
     keep_cols = list(dict.fromkeys(keep_cols))
@@ -512,7 +496,7 @@ if __name__ == "__main__":
     train_path = find_train_path()
 
     print("=" * 90)
-    print("Logistic Regression multi-label classifier")
+    print("Linear SVM multi-label classifier")
     print("=" * 90)
 
     print(f"Loading training data from: {train_path}")
@@ -521,11 +505,6 @@ if __name__ == "__main__":
     if not train_has_labels:
         print("Warning: some label columns are missing in the training dataset.")
 
-    # ========================================================
-    # SURGICAL FIX:
-    # Only split training data into train/dev.
-    # External test_dataset.jsonl is loaded separately below.
-    # ========================================================
     train_texts, dev_texts, y_train, y_dev = split_train_dev(train_df)
 
     print(f"Train size: {len(train_texts)}")
@@ -537,10 +516,7 @@ if __name__ == "__main__":
 
     test_df, test_has_labels = load_jsonl(TEST_PATH)
     test_texts = test_df[TEXT_COL].astype(str).tolist()
-
-    # SURGICAL FIX:
-    # Ensure test labels are binary too.
-    y_test = (test_df[LABEL_COLS].to_numpy() > 0).astype(int)
+    y_test = test_df[LABEL_COLS].to_numpy().astype(int)
 
     print(f"Test size: {len(test_texts)}")
 
@@ -554,13 +530,11 @@ if __name__ == "__main__":
         test_texts=test_texts,
     )
 
-    print("\nTraining Logistic Regression...")
+    print("\nTraining Linear SVM...")
     model = SafeOneVsRestClassifier(
-        LogisticRegression(
-            C=0.3,
-            class_weight="balanced",  # "balanced", None
-            solver="liblinear",
-            penalty="l2",
+        LinearSVC(
+            C=3.0,
+            class_weight="balanced",
             max_iter=20000,
             random_state=SEED,
         )
@@ -569,32 +543,32 @@ if __name__ == "__main__":
     model.fit(X_train, y_train)
 
     # Tune thresholds on dev only.
-    dev_scores = model.scores(X_dev, prefer_proba=True)
+    dev_scores = model.scores(X_dev, prefer_proba=False)
     _, thresholds = evaluate_predictions(
         y_dev,
         dev_scores,
         threshold=None,
-        dataset_name="Logistic Regression dev",
+        dataset_name="Linear SVM dev",
     )
 
     # Evaluate on external test set using dev-tuned thresholds.
-    test_scores = model.scores(X_test, prefer_proba=True)
+    test_scores = model.scores(X_test, prefer_proba=False)
 
     if test_has_labels:
         test_preds, _ = evaluate_predictions(
             y_test,
             test_scores,
             threshold=thresholds,
-            dataset_name="Logistic Regression test",
+            dataset_name="Linear SVM test",
         )
     else:
         test_preds = (test_scores >= thresholds).astype(int)
         print("Test labels not found. Saving predictions without test metrics.")
 
     # Save model artifacts.
-    model_path = ARTIFACT_DIR / "logreg_ovr.joblib"
-    threshold_path = ARTIFACT_DIR / "logreg_thresholds.npy"
-    scaler_path = ARTIFACT_DIR / "logreg_scaler.joblib"
+    model_path = ARTIFACT_DIR / "svm_ovr.joblib"
+    threshold_path = ARTIFACT_DIR / "svm_thresholds.npy"
+    scaler_path = ARTIFACT_DIR / "svm_scaler.joblib"
 
     dump(model, model_path)
     np.save(threshold_path, thresholds)
@@ -607,6 +581,5 @@ if __name__ == "__main__":
     save_predictions(
         test_df,
         test_preds,
-        PREDICTION_DIR / "test_logreg_predictions.csv",
-        include_true_labels=test_has_labels,
+        PREDICTION_DIR / "test_svm_predictions.csv",
     )
