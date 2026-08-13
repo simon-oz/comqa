@@ -145,9 +145,14 @@ class StreamTee:
             return False
 
     def fileno(self):
-        if self.original_stream is None or getattr(self.original_stream, "closed", False):
-            raise OSError("Underlying stream is closed.")
-        return self.original_stream.fileno()
+        try:
+            if self.original_stream is None or getattr(self.original_stream, "closed", False):
+                raise OSError("Underlying stream is closed.")
+            return self.original_stream.fileno()
+        except OSError:
+            raise
+        except Exception as exc:
+            raise OSError("fileno is not available for this stream.") from exc
 
     def close(self):
         # Intentionally do nothing here.
@@ -236,7 +241,15 @@ def load_prediction_df(path: Path):
     if not path.exists():
         return None
 
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"Warning: failed to read prediction file {path}: {e}")
+        return None
+
+    if df.empty:
+        print(f"Warning: prediction file {path} is empty.")
+        return None
 
     # Ensure prediction columns exist.
     for col in PRED_COLS:
@@ -283,15 +296,31 @@ def build_matrices(model_dfs):
     questions = None
 
     if all_have_id:
+        # Clean each dataframe:
+        # - remove rows with missing ID
+        # - remove duplicate IDs, keeping the first occurrence
+        cleaned_dfs = {}
+
+        for name in model_names_input:
+            df = model_dfs[name].copy()
+
+            df = df.dropna(subset=["id"])
+            df = df.drop_duplicates(subset=["id"], keep="first")
+
+            cleaned_dfs[name] = df
+
         # Use intersection of IDs across all models.
-        common_ids = set(model_dfs[model_names_input[0]]["id"].tolist())
+        common_ids = set(cleaned_dfs[model_names_input[0]]["id"].tolist())
 
         for name in model_names_input[1:]:
-            common_ids.intersection_update(set(model_dfs[name]["id"].tolist()))
+            common_ids.intersection_update(set(cleaned_dfs[name]["id"].tolist()))
 
         # Preserve row order from the first available prediction file.
-        first_ids = model_dfs[model_names_input[0]]["id"].tolist()
-        ordered_ids = [id_value for id_value in first_ids if id_value in common_ids]
+        first_ids = cleaned_dfs[model_names_input[0]]["id"].tolist()
+
+        # Ensure ordered IDs are unique while preserving order.
+        ordered_ids = list(dict.fromkeys(first_ids))
+        ordered_ids = [id_value for id_value in ordered_ids if id_value in common_ids]
 
         if not ordered_ids:
             raise ValueError("No common IDs found across prediction files.")
@@ -299,13 +328,19 @@ def build_matrices(model_dfs):
         ids = ordered_ids
 
         for name in model_names_input:
-            df = model_dfs[name]
+            df = cleaned_dfs[name]
 
             df_aligned = (
                 df.set_index("id")
                 .loc[ordered_ids]
                 .reset_index()
             )
+
+            if len(df_aligned) != len(ordered_ids):
+                raise ValueError(
+                    f"Aligned prediction file for model '{name}' has {len(df_aligned)} rows, "
+                    f"but expected {len(ordered_ids)} rows."
+                )
 
             pred_matrices.append(df_aligned[PRED_COLS].to_numpy().astype(int))
 
@@ -358,7 +393,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray, title: str):
             y_pred,
             target_names=LABEL_COLS,
             zero_division=0,
-            digits=4
+            digits=4,
         )
     )
 
@@ -385,6 +420,18 @@ def weighted_majority_vote(pred_matrices, model_names, weights_config):
         weighted_scores: shape (n_samples, n_labels), values in [0, 1]
         weights: normalized weights used
     """
+    if not pred_matrices:
+        raise ValueError("No prediction matrices were provided.")
+
+    # Validate shapes before stacking.
+    first_shape = pred_matrices[0].shape
+    for model_name, matrix in zip(model_names, pred_matrices):
+        if matrix.shape != first_shape:
+            raise ValueError(
+                f"Prediction matrix for model '{model_name}' has shape {matrix.shape}, "
+                f"but expected {first_shape}."
+            )
+
     pred_array = np.stack(pred_matrices, axis=0).astype(float)
 
     weights = np.array(
@@ -418,7 +465,7 @@ def main():
         df = load_prediction_df(path)
 
         if df is None:
-            print(f"Skipping {model_name}: prediction file not found at {path}")
+            print(f"Skipping {model_name}: prediction file not found or unreadable at {path}")
             continue
 
         model_dfs[model_name] = df
@@ -455,7 +502,9 @@ def main():
         print(f"  {name:10s} {weight:.4f}")
 
     # Threshold can be scalar or one threshold per label.
-    if np.isscalar(ENSEMBLE_THRESHOLD):
+    if ENSEMBLE_THRESHOLD is None:
+        thresholds = np.full(len(LABEL_COLS), 0.5, dtype=float)
+    elif np.isscalar(ENSEMBLE_THRESHOLD):
         thresholds = np.full(len(LABEL_COLS), float(ENSEMBLE_THRESHOLD), dtype=float)
     else:
         thresholds = np.asarray(ENSEMBLE_THRESHOLD, dtype=float)

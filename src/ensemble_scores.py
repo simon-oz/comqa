@@ -1,7 +1,12 @@
 # src/ensemble_scores.py
 
+import atexit
 import gc
 import json
+import sys
+import time
+import warnings
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +30,8 @@ from transformers import (
     BitsAndBytesConfig,
 )
 from peft import PeftModel
+
+warnings.filterwarnings("ignore")
 
 
 # ============================================================
@@ -89,9 +96,6 @@ QWEN_USE_QLORA = False
 # IMPORTANT:
 # Set these to the exact embedding models used when training
 # Logistic Regression and SVM.
-#
-# For example, if you trained Logistic Regression using
-# BAAI/bge-base-en-v1.5, set it here.
 # ------------------------------------------------------------
 
 CLASSICAL_MODELS = {
@@ -131,6 +135,27 @@ N_WEIGHT_TRIALS = 300
 BOOTSTRAP_THRESHOLDS = True
 N_THRESHOLD_BOOTSTRAP = 200
 
+# ------------------------------------------------------------
+# Optional precision-floor threshold tuning.
+#
+# This is disabled by default to preserve current behavior.
+#
+# If labels such as recommend, evaluate, analyze, or aggregation
+# over-predict on test, set:
+#
+# USE_PRECISION_FLOOR = True
+#
+# ------------------------------------------------------------
+
+USE_PRECISION_FLOOR = False
+
+MIN_PRECISION_FLOOR = {
+    "evaluate": 0.70,
+    "recommend": 0.70,
+    "analyze": 0.75,
+    "aggregation": 0.75,
+}
+
 # Neural inference settings.
 DEBERTA_BATCH_SIZE = 8
 QWEN_BATCH_SIZE = 2
@@ -138,13 +163,179 @@ MAX_LENGTH = 512
 
 OUTPUT_DIR = Path("artifacts")
 PREDICTION_DIR = Path("predictions")
+LOG_DIR = Path("logs")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PREDICTION_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 ENSEMBLE_WEIGHTS_PATH = OUTPUT_DIR / "ensemble_score_weights.json"
 ENSEMBLE_THRESHOLDS_PATH = OUTPUT_DIR / "ensemble_score_thresholds.npy"
 ENSEMBLE_PREDICTIONS_PATH = PREDICTION_DIR / "test_ensemble_score_predictions.csv"
+ENSEMBLE_TIMING_PATH = OUTPUT_DIR / "ensemble_score_timing.json"
+
+
+# ============================================================
+# Safe output logging
+# ============================================================
+
+_LOG_FILE = None
+_LOG_PATH = None
+_ORIGINAL_STDOUT = None
+_ORIGINAL_STDERR = None
+_TEE_STDOUT = None
+_TEE_STDERR = None
+_LOGGING_CLEANED_UP = False
+
+
+class StreamTee:
+    """
+    Safely writes output to both the original stream and a log file.
+    """
+
+    @staticmethod
+    def _to_text(message):
+        if isinstance(message, bytes):
+            return message.decode("utf-8", errors="ignore")
+        return str(message)
+
+    def __init__(self, original_stream, log_file):
+        self.original_stream = original_stream
+        self.log_file = log_file
+
+    @property
+    def closed(self):
+        try:
+            return bool(getattr(self.original_stream, "closed", False))
+        except Exception:
+            return False
+
+    def write(self, message):
+        try:
+            text = self._to_text(message)
+        except Exception:
+            return
+
+        # Write to terminal safely.
+        try:
+            if self.original_stream is not None and not getattr(self.original_stream, "closed", False):
+                self.original_stream.write(text)
+        except Exception:
+            pass
+
+        # Write to log file safely.
+        try:
+            if self.log_file is not None and not self.log_file.closed:
+                self.log_file.write(text)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            if self.original_stream is not None and not getattr(self.original_stream, "closed", False):
+                self.original_stream.flush()
+        except Exception:
+            pass
+
+        try:
+            if self.log_file is not None and not self.log_file.closed:
+                self.log_file.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        try:
+            return self.original_stream.isatty()
+        except Exception:
+            return False
+
+    def fileno(self):
+        try:
+            if self.original_stream is None or getattr(self.original_stream, "closed", False):
+                raise OSError("Underlying stream is closed.")
+            return self.original_stream.fileno()
+        except OSError:
+            raise
+        except Exception as exc:
+            raise OSError("fileno is not available for this stream.") from exc
+
+    def close(self):
+        # Intentionally do nothing here.
+        # Cleanup is handled by shutdown_output_logging().
+        pass
+
+
+def setup_output_logging():
+    global _LOG_FILE
+    global _LOG_PATH
+    global _ORIGINAL_STDOUT
+    global _ORIGINAL_STDERR
+    global _TEE_STDOUT
+    global _TEE_STDERR
+
+    if _LOG_FILE is not None:
+        return _LOG_PATH
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOG_DIR / f"ensemble_scores_{timestamp}.log"
+
+    _LOG_PATH = log_path
+    _LOG_FILE = open(log_path, "a", encoding="utf-8")
+
+    _ORIGINAL_STDOUT = sys.stdout
+    _ORIGINAL_STDERR = sys.stderr
+
+    _TEE_STDOUT = StreamTee(_ORIGINAL_STDOUT, _LOG_FILE)
+    _TEE_STDERR = StreamTee(_ORIGINAL_STDERR, _LOG_FILE)
+
+    sys.stdout = _TEE_STDOUT
+    sys.stderr = _TEE_STDERR
+
+    atexit.register(shutdown_output_logging)
+
+    print(f"Logging output to: {log_path}")
+    return log_path
+
+
+def shutdown_output_logging():
+    global _LOGGING_CLEANED_UP
+
+    if _LOGGING_CLEANED_UP:
+        return
+
+    _LOGGING_CLEANED_UP = True
+
+    # Restore original streams first.
+    if _ORIGINAL_STDOUT is not None:
+        sys.stdout = _ORIGINAL_STDOUT
+
+    if _ORIGINAL_STDERR is not None:
+        sys.stderr = _ORIGINAL_STDERR
+
+    # Flush tee objects safely.
+    for stream in (_TEE_STDOUT, _TEE_STDERR):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+
+    # Flush and close the log file safely.
+    if _LOG_FILE is not None:
+        try:
+            if not _LOG_FILE.closed:
+                _LOG_FILE.flush()
+                _LOG_FILE.close()
+        except Exception:
+            pass
+
+    # Flush original stdout/stderr safely.
+    for stream in (_ORIGINAL_STDOUT, _ORIGINAL_STDERR):
+        try:
+            if stream is not None and not getattr(stream, "closed", False):
+                stream.flush()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -337,6 +528,7 @@ def optimize_thresholds(y_true: np.ndarray, scores: np.ndarray) -> np.ndarray:
     for label_idx in range(y_true.shape[1]):
         col = y_true[:, label_idx]
         s = scores[:, label_idx]
+        label_name = LABEL_COLS[label_idx]
 
         if len(s) == 0:
             thresholds[label_idx] = 0.5
@@ -365,7 +557,22 @@ def optimize_thresholds(y_true: np.ndarray, scores: np.ndarray) -> np.ndarray:
             thresholds[label_idx] = 0.5
             continue
 
-        best_idx = int(np.nanargmax(f1))
+        # Optional precision-floor constraint.
+        min_prec = MIN_PRECISION_FLOOR.get(label_name, 0.0) if USE_PRECISION_FLOOR else 0.0
+
+        if min_prec > 0.0:
+            valid_mask = precision[:-1] >= min_prec
+
+            if valid_mask.any():
+                valid_f1 = np.where(valid_mask, f1, -1.0)
+                best_idx = int(np.nanargmax(valid_f1))
+            else:
+                # If no threshold satisfies the precision floor,
+                # choose the most conservative threshold with highest precision.
+                best_idx = int(np.argmax(precision[:-1]))
+        else:
+            best_idx = int(np.nanargmax(f1))
+
         thresholds[label_idx] = float(pr_thresholds[best_idx])
 
     return thresholds
@@ -409,7 +616,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray, title: str):
             y_pred,
             target_names=LABEL_COLS,
             zero_division=0,
-            digits=4
+            digits=4,
         )
     )
 
@@ -902,240 +1109,307 @@ def search_ensemble_weights(
 # ============================================================
 
 def main():
-    print("=" * 90)
-    print("Score-level multi-model ensemble")
-    print("=" * 90)
+    setup_output_logging()
 
-    train_path = find_train_path()
+    try:
+        total_start_time = time.perf_counter()
+        timing = {}
 
-    print(f"Loading training data from: {train_path}")
-    train_df, train_has_labels = load_jsonl(train_path)
+        print("=" * 90)
+        print("Score-level multi-model ensemble")
+        print("=" * 90)
 
-    if not train_has_labels:
-        print("Warning: some label columns are missing in the training dataset.")
+        train_path = find_train_path()
 
-    _, dev_texts, _, y_dev = split_train_dev(train_df)
+        print(f"Loading training data from: {train_path}")
+        train_df, train_has_labels = load_jsonl(train_path)
 
-    print(f"Dev size: {len(dev_texts)}")
+        if not train_has_labels:
+            print("Warning: some label columns are missing in the training dataset.")
 
-    print(f"Loading test data from: {TEST_PATH}")
-    if not Path(TEST_PATH).exists():
-        raise FileNotFoundError(f"Test dataset not found: {TEST_PATH}")
+        _, dev_texts, _, y_dev = split_train_dev(train_df)
 
-    test_df, test_has_labels = load_jsonl(TEST_PATH)
-    test_texts = test_df[TEXT_COL].astype(str).tolist()
-    y_test = (test_df[LABEL_COLS].to_numpy() > 0).astype(int)
+        print(f"Dev size: {len(dev_texts)}")
 
-    print(f"Test size: {len(test_texts)}")
+        print(f"Loading test data from: {TEST_PATH}")
+        if not Path(TEST_PATH).exists():
+            raise FileNotFoundError(f"Test dataset not found: {TEST_PATH}")
 
-    if not test_has_labels:
-        print("Warning: test dataset does not contain all label columns.")
-        print("Test metrics will be skipped.")
+        test_df, test_has_labels = load_jsonl(TEST_PATH)
+        test_texts = test_df[TEXT_COL].astype(str).tolist()
+        y_test = (test_df[LABEL_COLS].to_numpy() > 0).astype(int)
 
-    # --------------------------------------------------------
-    # Collect raw scores from each model.
-    # --------------------------------------------------------
-    raw_dev_scores = {}
-    raw_test_scores = {}
+        print(f"Test size: {len(test_texts)}")
 
-    # Classical models.
-    for model_name, config in CLASSICAL_MODELS.items():
-        if model_name == "logreg" and not ENABLE_LOGREG:
-            continue
+        if not test_has_labels:
+            print("Warning: test dataset does not contain all label columns.")
+            print("Test metrics will be skipped.")
 
-        if model_name == "svm" and not ENABLE_SVM:
-            continue
+        # --------------------------------------------------------
+        # Collect raw scores from each model.
+        # --------------------------------------------------------
+        raw_dev_scores = {}
+        raw_test_scores = {}
+        model_timing = {}
 
-        scores = load_classical_scores(
-            model_name=model_name,
-            config=config,
-            dev_texts=dev_texts,
-            test_texts=test_texts,
-        )
+        # Classical models.
+        for model_name, config in CLASSICAL_MODELS.items():
+            if model_name == "logreg" and not ENABLE_LOGREG:
+                continue
 
-        if scores is None:
-            continue
+            if model_name == "svm" and not ENABLE_SVM:
+                continue
 
-        dev_scores, test_scores = scores
-        raw_dev_scores[model_name] = dev_scores
-        raw_test_scores[model_name] = test_scores
+            model_start_time = time.perf_counter()
 
-    # DeBERTa.
-    if ENABLE_DEBERTA:
-        scores = load_deberta_scores(dev_texts, test_texts)
+            scores = load_classical_scores(
+                model_name=model_name,
+                config=config,
+                dev_texts=dev_texts,
+                test_texts=test_texts,
+            )
 
-        if scores is not None:
+            model_elapsed_time = time.perf_counter() - model_start_time
+
+            if scores is None:
+                continue
+
             dev_scores, test_scores = scores
-            raw_dev_scores["deberta"] = dev_scores
-            raw_test_scores["deberta"] = test_scores
+            raw_dev_scores[model_name] = dev_scores
+            raw_test_scores[model_name] = test_scores
+            model_timing[model_name] = float(model_elapsed_time)
 
-    # Qwen.
-    if ENABLE_QWEN:
-        scores = load_qwen_scores(dev_texts, test_texts)
+        # DeBERTa.
+        if ENABLE_DEBERTA:
+            model_start_time = time.perf_counter()
 
-        if scores is not None:
-            dev_scores, test_scores = scores
-            raw_dev_scores["qwen"] = dev_scores
-            raw_test_scores["qwen"] = test_scores
+            scores = load_deberta_scores(dev_texts, test_texts)
 
-    if not raw_dev_scores:
-        raise RuntimeError("No models were available for ensembling.")
+            model_elapsed_time = time.perf_counter() - model_start_time
 
-    print("\nModels included in score-level ensemble:")
-    for name in raw_dev_scores.keys():
-        print(f"  - {name}")
+            if scores is not None:
+                dev_scores, test_scores = scores
+                raw_dev_scores["deberta"] = dev_scores
+                raw_test_scores["deberta"] = test_scores
+                model_timing["deberta"] = float(model_elapsed_time)
 
-    # --------------------------------------------------------
-    # Rank-normalize scores.
-    # --------------------------------------------------------
-    print("\nRank-normalizing scores using dev set...")
+        # Qwen.
+        if ENABLE_QWEN:
+            model_start_time = time.perf_counter()
 
-    rank_dev_scores = {}
-    rank_test_scores = {}
+            scores = load_qwen_scores(dev_texts, test_texts)
 
-    for model_name in raw_dev_scores.keys():
-        transformer = fit_rank_transformer(raw_dev_scores[model_name])
+            model_elapsed_time = time.perf_counter() - model_start_time
 
-        rank_dev_scores[model_name] = apply_rank_transform(
-            raw_dev_scores[model_name],
-            transformer,
+            if scores is not None:
+                dev_scores, test_scores = scores
+                raw_dev_scores["qwen"] = dev_scores
+                raw_test_scores["qwen"] = test_scores
+                model_timing["qwen"] = float(model_elapsed_time)
+
+        if not raw_dev_scores:
+            raise RuntimeError("No models were available for ensembling.")
+
+        timing["model_score_loading"] = model_timing
+        timing["model_score_loading_total"] = float(sum(model_timing.values()))
+
+        print("\nModels included in score-level ensemble:")
+        for name in raw_dev_scores.keys():
+            print(f"  - {name}")
+
+        print("\nModel score loading time:")
+        for name, elapsed in model_timing.items():
+            print(f"  {name:10s} {elapsed:.2f} seconds ({elapsed / 60:.2f} minutes)")
+
+        # --------------------------------------------------------
+        # Rank-normalize scores.
+        # --------------------------------------------------------
+        rank_start_time = time.perf_counter()
+
+        print("\nRank-normalizing scores using dev set...")
+
+        rank_dev_scores = {}
+        rank_test_scores = {}
+
+        for model_name in raw_dev_scores.keys():
+            transformer = fit_rank_transformer(raw_dev_scores[model_name])
+
+            rank_dev_scores[model_name] = apply_rank_transform(
+                raw_dev_scores[model_name],
+                transformer,
+            )
+
+            rank_test_scores[model_name] = apply_rank_transform(
+                raw_test_scores[model_name],
+                transformer,
+            )
+
+        timing["rank_normalization"] = float(time.perf_counter() - rank_start_time)
+
+        # --------------------------------------------------------
+        # Optional: print individual AP macro.
+        # --------------------------------------------------------
+        print("\nIndividual model AP macro after rank normalization:")
+        for model_name in rank_dev_scores.keys():
+            dev_ap = safe_average_precision(y_dev, rank_dev_scores[model_name], average="macro")
+
+            if test_has_labels:
+                test_ap = safe_average_precision(y_test, rank_test_scores[model_name], average="macro")
+                print(f"  {model_name:10s} dev AP macro: {dev_ap:.4f} | test AP macro: {test_ap:.4f}")
+            else:
+                print(f"  {model_name:10s} dev AP macro: {dev_ap:.4f}")
+
+        # --------------------------------------------------------
+        # Search ensemble weights.
+        # --------------------------------------------------------
+        weight_start_time = time.perf_counter()
+
+        if SEARCH_WEIGHTS:
+            print("\nSearching ensemble weights on dev set...")
+            weights, search_score = search_ensemble_weights(
+                dev_score_dict=rank_dev_scores,
+                y_dev=y_dev,
+                metric=WEIGHT_SEARCH_METRIC,
+                n_trials=N_WEIGHT_TRIALS,
+                seed=SEED,
+            )
+
+            print(f"Weight search metric: {WEIGHT_SEARCH_METRIC}")
+            print(f"Best dev search score: {search_score:.4f}")
+        else:
+            model_names = list(rank_dev_scores.keys())
+            total = sum(float(MODEL_WEIGHTS.get(name, 1.0)) for name in model_names)
+
+            if total <= 0:
+                weights = {name: 1.0 / len(model_names) for name in model_names}
+            else:
+                weights = {
+                    name: float(MODEL_WEIGHTS.get(name, 1.0)) / total
+                    for name in model_names
+                }
+
+        timing["weight_search"] = float(time.perf_counter() - weight_start_time)
+
+        print("\nFinal ensemble weights:")
+        for name, weight in weights.items():
+            print(f"  {name:10s} {weight:.4f}")
+
+        # --------------------------------------------------------
+        # Combine scores.
+        # --------------------------------------------------------
+        combined_dev_scores, normalized_weights = combine_score_dict(rank_dev_scores, weights)
+        combined_test_scores, _ = combine_score_dict(rank_test_scores, weights)
+
+        # Update weights dict with normalized values.
+        weights = {
+            name: float(weight)
+            for name, weight in zip(rank_dev_scores.keys(), normalized_weights)
+        }
+
+        # --------------------------------------------------------
+        # Tune thresholds on dev.
+        # --------------------------------------------------------
+        threshold_start_time = time.perf_counter()
+
+        print("\nTuning ensemble thresholds on dev set...")
+
+        if BOOTSTRAP_THRESHOLDS:
+            thresholds = bootstrap_optimize_thresholds(
+                y_dev,
+                combined_dev_scores,
+                n_bootstrap=N_THRESHOLD_BOOTSTRAP,
+                seed=SEED,
+            )
+        else:
+            thresholds = optimize_thresholds(y_dev, combined_dev_scores)
+
+        timing["threshold_tuning"] = float(time.perf_counter() - threshold_start_time)
+
+        print("\nEnsemble thresholds:")
+        for label_name, threshold in zip(LABEL_COLS, thresholds):
+            print(f"  {label_name:25s} {threshold:.4f}")
+
+        # --------------------------------------------------------
+        # Evaluate and save outputs.
+        # --------------------------------------------------------
+        eval_save_start_time = time.perf_counter()
+
+        dev_preds = (combined_dev_scores >= thresholds).astype(int)
+
+        evaluate_predictions(
+            y_dev,
+            dev_preds,
+            title="Score-level ensemble: dev report",
         )
 
-        rank_test_scores[model_name] = apply_rank_transform(
-            raw_test_scores[model_name],
-            transformer,
-        )
-
-    # --------------------------------------------------------
-    # Optional: print individual AP macro.
-    # --------------------------------------------------------
-    print("\nIndividual model AP macro after rank normalization:")
-    for model_name in rank_dev_scores.keys():
-        dev_ap = safe_average_precision(y_dev, rank_dev_scores[model_name], average="macro")
+        test_preds = (combined_test_scores >= thresholds).astype(int)
 
         if test_has_labels:
-            test_ap = safe_average_precision(y_test, rank_test_scores[model_name], average="macro")
-            print(f"  {model_name:10s} dev AP macro: {dev_ap:.4f} | test AP macro: {test_ap:.4f}")
-        else:
-            print(f"  {model_name:10s} dev AP macro: {dev_ap:.4f}")
+            evaluate_predictions(
+                y_test,
+                test_preds,
+                title="Score-level ensemble: test report",
+            )
 
-    # --------------------------------------------------------
-    # Search ensemble weights.
-    # --------------------------------------------------------
-    if SEARCH_WEIGHTS:
-        print("\nSearching ensemble weights on dev set...")
-        weights, search_score = search_ensemble_weights(
-            dev_score_dict=rank_dev_scores,
-            y_dev=y_dev,
-            metric=WEIGHT_SEARCH_METRIC,
-            n_trials=N_WEIGHT_TRIALS,
-            seed=SEED,
-        )
+        with open(ENSEMBLE_WEIGHTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(weights, f, indent=2)
 
-        print(f"Weight search metric: {WEIGHT_SEARCH_METRIC}")
-        print(f"Best dev search score: {search_score:.4f}")
-    else:
-        model_names = list(rank_dev_scores.keys())
-        total = sum(float(MODEL_WEIGHTS.get(name, 1.0)) for name in model_names)
+        np.save(ENSEMBLE_THRESHOLDS_PATH, thresholds)
 
-        if total <= 0:
-            weights = {name: 1.0 / len(model_names) for name in model_names}
-        else:
-            weights = {
-                name: float(MODEL_WEIGHTS.get(name, 1.0)) / total
-                for name in model_names
-            }
+        output_data = {}
 
-    print("\nFinal ensemble weights:")
-    for name, weight in weights.items():
-        print(f"  {name:10s} {weight:.4f}")
+        if "id" in test_df.columns:
+            output_data["id"] = test_df["id"].tolist()
 
-    # --------------------------------------------------------
-    # Combine scores.
-    # --------------------------------------------------------
-    combined_dev_scores, normalized_weights = combine_score_dict(rank_dev_scores, weights)
-    combined_test_scores, _ = combine_score_dict(rank_test_scores, weights)
+        if TEXT_COL in test_df.columns:
+            output_data[TEXT_COL] = test_df[TEXT_COL].tolist()
 
-    # Update weights dict with normalized values.
-    weights = {
-        name: float(weight)
-        for name, weight in zip(rank_dev_scores.keys(), normalized_weights)
-    }
-
-    # --------------------------------------------------------
-    # Tune thresholds on dev.
-    # --------------------------------------------------------
-    print("\nTuning ensemble thresholds on dev set...")
-
-    if BOOTSTRAP_THRESHOLDS:
-        thresholds = bootstrap_optimize_thresholds(
-            y_dev,
-            combined_dev_scores,
-            n_bootstrap=N_THRESHOLD_BOOTSTRAP,
-            seed=SEED,
-        )
-    else:
-        thresholds = optimize_thresholds(y_dev, combined_dev_scores)
-
-    print("\nEnsemble thresholds:")
-    for label_name, threshold in zip(LABEL_COLS, thresholds):
-        print(f"  {label_name:25s} {threshold:.4f}")
-
-    # --------------------------------------------------------
-    # Evaluate.
-    # --------------------------------------------------------
-    dev_preds = (combined_dev_scores >= thresholds).astype(int)
-
-    evaluate_predictions(
-        y_dev,
-        dev_preds,
-        title="Score-level ensemble: dev report",
-    )
-
-    test_preds = (combined_test_scores >= thresholds).astype(int)
-
-    if test_has_labels:
-        evaluate_predictions(
-            y_test,
-            test_preds,
-            title="Score-level ensemble: test report",
-        )
-
-    # --------------------------------------------------------
-    # Save outputs.
-    # --------------------------------------------------------
-    with open(ENSEMBLE_WEIGHTS_PATH, "w", encoding="utf-8") as f:
-        json.dump(weights, f, indent=2)
-
-    np.save(ENSEMBLE_THRESHOLDS_PATH, thresholds)
-
-    output_data = {}
-
-    if "id" in test_df.columns:
-        output_data["id"] = test_df["id"].tolist()
-
-    if TEXT_COL in test_df.columns:
-        output_data[TEXT_COL] = test_df[TEXT_COL].tolist()
-
-    for i, col in enumerate(LABEL_COLS):
-        output_data[f"pred_{col}"] = test_preds[:, i]
-        output_data[f"ensemble_score_{col}"] = combined_test_scores[:, i]
-
-    if test_has_labels:
         for i, col in enumerate(LABEL_COLS):
-            output_data[col] = y_test[:, i]
+            output_data[f"pred_{col}"] = test_preds[:, i]
+            output_data[f"ensemble_score_{col}"] = combined_test_scores[:, i]
 
-    output_df = pd.DataFrame(output_data)
-    output_df.to_csv(ENSEMBLE_PREDICTIONS_PATH, index=False)
+        if test_has_labels:
+            for i, col in enumerate(LABEL_COLS):
+                output_data[col] = y_test[:, i]
 
-    print("\nSaved ensemble weights:")
-    print(ENSEMBLE_WEIGHTS_PATH)
+        output_df = pd.DataFrame(output_data)
+        output_df.to_csv(ENSEMBLE_PREDICTIONS_PATH, index=False)
 
-    print("Saved ensemble thresholds:")
-    print(ENSEMBLE_THRESHOLDS_PATH)
+        timing["evaluation_and_saving"] = float(time.perf_counter() - eval_save_start_time)
+        timing["total"] = float(time.perf_counter() - total_start_time)
 
-    print("Saved ensemble predictions:")
-    print(ENSEMBLE_PREDICTIONS_PATH)
+        # --------------------------------------------------------
+        # Save timing.
+        # --------------------------------------------------------
+        with open(ENSEMBLE_TIMING_PATH, "w", encoding="utf-8") as f:
+            json.dump(timing, f, indent=2)
+
+        print("\nSaved ensemble weights:")
+        print(ENSEMBLE_WEIGHTS_PATH)
+
+        print("Saved ensemble thresholds:")
+        print(ENSEMBLE_THRESHOLDS_PATH)
+
+        print("Saved ensemble predictions:")
+        print(ENSEMBLE_PREDICTIONS_PATH)
+
+        print("Saved ensemble timing:")
+        print(ENSEMBLE_TIMING_PATH)
+
+        print("\n" + "=" * 90)
+        print("Timing summary")
+        print("=" * 90)
+
+        for key, value in timing.items():
+            if isinstance(value, dict):
+                print(f"{key}:")
+                for sub_key, sub_value in value.items():
+                    print(f"  {sub_key:25s} {sub_value:.2f} seconds ({sub_value / 60:.2f} minutes)")
+            else:
+                print(f"{key:25s} {value:.2f} seconds ({value / 60:.2f} minutes)")
+
+    finally:
+        shutdown_output_logging()
 
 
 if __name__ == "__main__":
