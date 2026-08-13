@@ -3,6 +3,7 @@
 import atexit
 import json
 import sys
+import time
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -80,51 +81,158 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Output logging
 # ============================================================
 
+_LOG_FILE = None
+_LOG_PATH = None
+_ORIGINAL_STDOUT = None
+_ORIGINAL_STDERR = None
+_TEE_STDOUT = None
+_TEE_STDERR = None
+_LOGGING_CLEANED_UP = False
+
+
 class StreamTee:
     """
-    Writes output to both the original stream and a log file.
+    Safely writes output to both the original stream and a log file.
     """
+
+    @staticmethod
+    def _to_text(message):
+        if isinstance(message, bytes):
+            return message.decode("utf-8", errors="ignore")
+        return str(message)
 
     def __init__(self, original_stream, log_file):
         self.original_stream = original_stream
         self.log_file = log_file
 
+    @property
+    def closed(self):
+        try:
+            return bool(getattr(self.original_stream, "closed", False))
+        except Exception:
+            return False
+
     def write(self, message):
         try:
-            self.original_stream.write(message)
-        except TypeError:
-            self.original_stream.write(message.decode("utf-8", errors="ignore"))
+            text = self._to_text(message)
+        except Exception:
+            return
 
+        # Write to terminal safely.
         try:
-            self.log_file.write(message)
-        except TypeError:
-            self.log_file.write(message.decode("utf-8", errors="ignore"))
+            if self.original_stream is not None and not getattr(self.original_stream, "closed", False):
+                self.original_stream.write(text)
+        except Exception:
+            pass
+
+        # Write to log file safely.
+        try:
+            if self.log_file is not None and not self.log_file.closed:
+                self.log_file.write(text)
+        except Exception:
+            pass
 
     def flush(self):
-        self.original_stream.flush()
-        self.log_file.flush()
+        try:
+            if self.original_stream is not None and not getattr(self.original_stream, "closed", False):
+                self.original_stream.flush()
+        except Exception:
+            pass
+
+        try:
+            if self.log_file is not None and not self.log_file.closed:
+                self.log_file.flush()
+        except Exception:
+            pass
 
     def isatty(self):
-        return self.original_stream.isatty()
+        try:
+            return self.original_stream.isatty()
+        except Exception:
+            return False
 
     def fileno(self):
+        if self.original_stream is None or getattr(self.original_stream, "closed", False):
+            raise OSError("Underlying stream is closed.")
         return self.original_stream.fileno()
+
+    def close(self):
+        # Intentionally do nothing here.
+        # Cleanup is handled by shutdown_output_logging().
+        pass
 
 
 def setup_output_logging():
+    global _LOG_FILE
+    global _LOG_PATH
+    global _ORIGINAL_STDOUT
+    global _ORIGINAL_STDERR
+    global _TEE_STDOUT
+    global _TEE_STDERR
+
+    if _LOG_FILE is not None:
+        return _LOG_PATH
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOG_DIR / f"train_logistic_regression_{timestamp}.log"
 
-    log_file = open(log_path, "a", encoding="utf-8")
+    _LOG_PATH = log_path
+    _LOG_FILE = open(log_path, "a", encoding="utf-8")
 
-    sys.stdout = StreamTee(sys.stdout, log_file)
-    sys.stderr = StreamTee(sys.stderr, log_file)
+    _ORIGINAL_STDOUT = sys.stdout
+    _ORIGINAL_STDERR = sys.stderr
 
-    # Ensure the log file is closed when the program exits.
-    atexit.register(log_file.close)
+    _TEE_STDOUT = StreamTee(_ORIGINAL_STDOUT, _LOG_FILE)
+    _TEE_STDERR = StreamTee(_ORIGINAL_STDERR, _LOG_FILE)
+
+    sys.stdout = _TEE_STDOUT
+    sys.stderr = _TEE_STDERR
+
+    atexit.register(shutdown_output_logging)
 
     print(f"Logging output to: {log_path}")
     return log_path
+
+
+def shutdown_output_logging():
+    global _LOGGING_CLEANED_UP
+
+    if _LOGGING_CLEANED_UP:
+        return
+
+    _LOGGING_CLEANED_UP = True
+
+    # Restore original streams first.
+    if _ORIGINAL_STDOUT is not None:
+        sys.stdout = _ORIGINAL_STDOUT
+
+    if _ORIGINAL_STDERR is not None:
+        sys.stderr = _ORIGINAL_STDERR
+
+    # Flush tee objects safely.
+    for stream in (_TEE_STDOUT, _TEE_STDERR):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+
+    # Flush and close the log file safely.
+    if _LOG_FILE is not None:
+        try:
+            if not _LOG_FILE.closed:
+                _LOG_FILE.flush()
+                _LOG_FILE.close()
+        except Exception:
+            pass
+
+    # Flush original stdout/stderr safely.
+    for stream in (_ORIGINAL_STDOUT, _ORIGINAL_STDERR):
+        try:
+            if stream is not None and not getattr(stream, "closed", False):
+                stream.flush()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -506,9 +614,7 @@ def save_predictions(
 # Main
 # ============================================================
 
-if __name__ == "__main__":
-    setup_output_logging()
-
+def main():
     train_path = find_train_path()
 
     print("=" * 90)
@@ -554,7 +660,12 @@ if __name__ == "__main__":
         test_texts=test_texts,
     )
 
+    # ========================================================
+    # TIMING: training
+    # ========================================================
     print("\nTraining Logistic Regression...")
+    train_start_time = time.perf_counter()
+
     model = SafeOneVsRestClassifier(
         LogisticRegression(
             C=0.3,
@@ -568,6 +679,10 @@ if __name__ == "__main__":
 
     model.fit(X_train, y_train)
 
+    train_elapsed_time = time.perf_counter() - train_start_time
+
+    print(f"Training time: {train_elapsed_time:.2f} seconds ({train_elapsed_time / 60:.2f} minutes)")
+
     # Tune thresholds on dev only.
     dev_scores = model.scores(X_dev, prefer_proba=True)
     _, thresholds = evaluate_predictions(
@@ -576,6 +691,11 @@ if __name__ == "__main__":
         threshold=None,
         dataset_name="Logistic Regression dev",
     )
+
+    # ========================================================
+    # TIMING: test evaluation
+    # ========================================================
+    test_start_time = time.perf_counter()
 
     # Evaluate on external test set using dev-tuned thresholds.
     test_scores = model.scores(X_test, prefer_proba=True)
@@ -590,6 +710,8 @@ if __name__ == "__main__":
     else:
         test_preds = (test_scores >= thresholds).astype(int)
         print("Test labels not found. Saving predictions without test metrics.")
+
+    test_elapsed_time = time.perf_counter() - test_start_time
 
     # Save model artifacts.
     model_path = ARTIFACT_DIR / "logreg_ovr.joblib"
@@ -610,3 +732,33 @@ if __name__ == "__main__":
         PREDICTION_DIR / "test_logreg_predictions.csv",
         include_true_labels=test_has_labels,
     )
+
+    # ========================================================
+    # Save and print timing summary
+    # ========================================================
+    timing_info = {
+        "train_seconds": float(train_elapsed_time),
+        "train_minutes": float(train_elapsed_time / 60.0),
+        "test_seconds": float(test_elapsed_time),
+        "test_minutes": float(test_elapsed_time / 60.0),
+    }
+
+    timing_path = ARTIFACT_DIR / "logreg_timing.json"
+    with open(timing_path, "w", encoding="utf-8") as f:
+        json.dump(timing_info, f, indent=2)
+
+    print("=" * 90)
+    print("Timing summary")
+    print("=" * 90)
+    print(f"Training time: {train_elapsed_time:.2f} seconds ({train_elapsed_time / 60:.2f} minutes)")
+    print(f"Test evaluation time: {test_elapsed_time:.2f} seconds ({test_elapsed_time / 60:.2f} minutes)")
+    print(f"Saved timing: {timing_path}")
+
+
+if __name__ == "__main__":
+    setup_output_logging()
+
+    try:
+        main()
+    finally:
+        shutdown_output_logging()
