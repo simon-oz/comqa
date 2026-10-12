@@ -8,6 +8,13 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 
+# Arguments opt into the reproducible comparison runner. No-argument invocations
+# retain the legacy artifacts consumed by ensemble_scores.py.
+if __name__ == "__main__" and len(sys.argv) > 1:
+    from run_embedding_experiments import main as experiment_main
+
+    sys.exit(experiment_main(default_classifiers=["logreg"]))
+
 import numpy as np
 import pandas as pd
 from joblib import dump
