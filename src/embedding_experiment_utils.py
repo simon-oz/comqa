@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.metrics import (
-    accuracy_score, average_precision_score, classification_report, f1_score,
+    accuracy_score, average_precision_score, classification_report,
     hamming_loss, precision_recall_curve,
 )
 from sklearn.model_selection import train_test_split
@@ -130,6 +130,15 @@ def optimize_thresholds(y_true, scores):
     return thresholds
 
 
+def aggregate_classification_metrics(report):
+    """Expose the same thresholded metrics in detailed and tabular reports."""
+    return {
+        f"{metric}_{average}": float(report[f"{average} avg"][report_key])
+        for average in ("micro", "macro", "weighted", "samples")
+        for metric, report_key in (("precision", "precision"), ("recall", "recall"), ("f1", "f1-score"))
+    }
+
+
 def evaluate(y_true, scores, thresholds):
     """Evaluation never tunes thresholds, including when test labels are present."""
     if scores.shape != y_true.shape or not np.isfinite(scores).all():
@@ -139,16 +148,14 @@ def evaluate(y_true, scores, thresholds):
         "hamming_loss": float(hamming_loss(y_true, predictions)),
         "exact_match_ratio": float(accuracy_score(y_true, predictions)),
     }
-    for average in ("micro", "macro", "weighted", "samples"):
-        metrics[f"f1_{average}"] = float(f1_score(
-            y_true, predictions, average=average, zero_division=0,
-        ))
+    report = classification_report(
+        y_true, predictions, target_names=LABEL_COLS, zero_division=0, output_dict=True,
+    )
+    metrics.update(aggregate_classification_metrics(report))
     for average in ("micro", "macro", "weighted"):
         value = float(average_precision_score(y_true, scores, average=average))
         metrics[f"average_precision_{average}"] = value if np.isfinite(value) else None
-    metrics["classification_report"] = classification_report(
-        y_true, predictions, target_names=LABEL_COLS, zero_division=0, output_dict=True,
-    )
+    metrics["classification_report"] = report
     return metrics
 
 
