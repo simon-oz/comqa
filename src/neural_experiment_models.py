@@ -1,4 +1,4 @@
-"""Text-only scorers for base and fine-tuned DeBERTa/Qwen checkpoints.
+"""Text-only scorers for base and fine-tuned DeBERTa/ModernBERT/Qwen checkpoints.
 
 External sentence embeddings are intentionally not passed into these models.
 Embedding influence is measured separately via explicitly labeled score fusion.
@@ -15,7 +15,16 @@ import numpy as np
 
 from embedding_experiment_utils import LABEL_COLS
 
-NEURAL_CLASSIFIERS = ("deberta", "qwen", "deberta_finetuned", "qwen_finetuned")
+# CHANGE 3a: register ModernBERT (base + fine-tuned) and split out MLM classifiers
+# so that zero-shot routing (predict_mlm, cloze metadata, fixed thresholds) applies
+# to both DeBERTa and ModernBERT without duplicating `name == "deberta"` checks.
+NEURAL_CLASSIFIERS = (
+    "deberta", "modernbert", "qwen",
+    "deberta_finetuned", "modernbert_finetuned", "qwen_finetuned",
+)
+# Bidirectional encoders routed through predict_mlm for zero-shot.
+MLM_CLASSIFIERS = frozenset(("deberta", "modernbert"))
+
 VERBALIZERS = [
     "retrieval", "comparison", "aggregation", "context", "time", "citation",
     "extraction", "documents", "summary", "analysis", "evaluation", "recommendation",
@@ -59,10 +68,28 @@ def qwen_messages(question):
     ]
 
 
+# CHANGE 3e: Qwen zero-shot parsing now survives a single malformed row. The
+# JSON path is unchanged (still strict, still rejects unknown labels). Only the
+# json.JSONDecodeError case is new: it extracts label names that literally appear
+# as whole words in the raw output. It never fabricates — an unmentioned label
+# stays 0.
 def parse_qwen_labels(raw):
     """Never turn malformed output or negative prose into fabricated predictions."""
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
-    obj = json.loads(text)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback for a single malformed row: only accept labels that appear as
+        # whole words. Anything not explicitly mentioned stays 0.
+        lowered = text.lower()
+        found = set()
+        for label in LABEL_COLS:
+            for variant in (label, label.replace("_", " ")):
+                if re.search(rf"(?<![a-z0-9_]){re.escape(variant)}(?![a-z0-9_])", lowered):
+                    found.add(label)
+                    break
+        return np.array([int(label in found) for label in LABEL_COLS], dtype=float)
+
     labels = obj.get("labels") if isinstance(obj, dict) else obj
     if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels):
         raise ValueError("Qwen must return a JSON object with a labels list")
@@ -188,8 +215,15 @@ def score_neural(name, texts_by_split, args, output):
 
     if name not in NEURAL_CLASSIFIERS:
         raise ValueError(f"Unknown neural classifier: {name}")
-    source = {"deberta": args.deberta_model, "qwen": args.qwen_model,
-              "deberta_finetuned": args.deberta_checkpoint, "qwen_finetuned": args.qwen_checkpoint}[name]
+    # CHANGE 3b: register ModernBERT base + checkpoint sources.
+    source = {
+        "deberta": args.deberta_model,
+        "modernbert": args.modernbert_model,
+        "qwen": args.qwen_model,
+        "deberta_finetuned": args.deberta_checkpoint,
+        "modernbert_finetuned": args.modernbert_checkpoint,
+        "qwen_finetuned": args.qwen_checkpoint,
+    }[name]
     if name.endswith("_finetuned") and not Path(source).is_dir():
         raise FileNotFoundError(f"{name} checkpoint not found: {source}")
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -232,31 +266,53 @@ def score_neural(name, texts_by_split, args, output):
             if not head_keys or any(weights[key].shape[0] != len(LABEL_COLS) for key in head_keys):
                 raise ValueError("Qwen adapter is missing its trained 12-label score.weight classification head")
             del weights
-            base_model, info = AutoModelForSequenceClassification.from_pretrained(
-                base_source, num_labels=len(LABEL_COLS), problem_type="multi_label_classification",
-                output_loading_info=True, **model_kwargs,
-            )
+            # CHANGE 3c: fall back to torch_dtype= on transformers that predate `dtype=`.
+            try:
+                base_model, info = AutoModelForSequenceClassification.from_pretrained(
+                    base_source, num_labels=len(LABEL_COLS), problem_type="multi_label_classification",
+                    output_loading_info=True, **model_kwargs,
+                )
+            except TypeError:
+                model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
+                base_model, info = AutoModelForSequenceClassification.from_pretrained(
+                    base_source, num_labels=len(LABEL_COLS), problem_type="multi_label_classification",
+                    output_loading_info=True, **model_kwargs,
+                )
             ensure_loaded_weights(info, allowed_missing=("score.weight",))
             model = PeftModel.from_pretrained(base_model, str(source), **common)
             metadata.update(base_model=base_source, adapter=True)
         else:
-            cls = AutoModelForMaskedLM if name == "deberta" else AutoModelForCausalLM if name == "qwen" else AutoModelForSequenceClassification
-            model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
+            # CHANGE 3d: route via MLM_CLASSIFIERS instead of `name == "deberta"`.
+            if name in MLM_CLASSIFIERS:
+                cls = AutoModelForMaskedLM
+            elif name == "qwen":
+                cls = AutoModelForCausalLM
+            else:
+                cls = AutoModelForSequenceClassification
+            # CHANGE 3c: same dtype fallback as above.
+            try:
+                model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
+            except TypeError:
+                model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
+                model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
             ensure_loaded_weights(info)
         if name.startswith("qwen"):
             model.config.pad_token_id = tokenizer.pad_token_id
         model.to(device).eval()
         metadata["revision"] = getattr(model.config, "_commit_hash", None)
+        # CHANGE 3d: use MLM_CLASSIFIERS so ModernBERT inherits the cloze metadata.
         if name.endswith("_finetuned"):
             order = checkpoint_label_order(model.config, args.checkpoint_labels)
             metadata.update(label_order=LABEL_COLS.copy(),
                             output_column_order=order, score_type="sigmoid_probability", threshold_policy="dev_f1")
         else:
             order = None
-            metadata.update(score_type="cloze_candidate_probability" if name == "deberta" else "generated_binary_label",
-                            fixed_threshold=0.15 if name == "deberta" else 0.5,
-                            threshold_policy="fixed_zero_shot")
-        if name == "deberta":
+            is_mlm = name in MLM_CLASSIFIERS
+            metadata.update(
+                score_type="cloze_candidate_probability" if is_mlm else "generated_binary_label",
+                fixed_threshold=0.15 if is_mlm else 0.5,
+                threshold_policy="fixed_zero_shot")
+        if name in MLM_CLASSIFIERS:
             metadata["verbalizers"] = dict(zip(LABEL_COLS, VERBALIZERS))
             metadata["truncation_side"] = "left"
         if name == "qwen":
@@ -269,12 +325,14 @@ def score_neural(name, texts_by_split, args, output):
         for split, texts in texts_by_split.items():
             started = time.perf_counter()
             print(f"Scoring {name}: {split} ({len(texts)} rows)", flush=True)
-            if name == "deberta":
+            # CHANGE 3d: route via MLM_CLASSIFIERS so ModernBERT scores through predict_mlm.
+            if name in MLM_CLASSIFIERS:
                 scores[split] = predict_mlm(model, tokenizer, texts, args)
             elif name == "qwen":
                 scores[split] = predict_qwen_generation(model, tokenizer, texts, args, output / f"{split}_raw.jsonl")
             else:
-                scores[split] = predict_classification(model, tokenizer, texts, args, qwen=name.startswith("qwen"), order=order)
+                scores[split] = predict_classification(model, tokenizer, texts, args,
+                                                       qwen=name.startswith("qwen"), order=order)
             timing[f"score_{split}_seconds"] = time.perf_counter() - started
         return scores, metadata, timing
     finally:

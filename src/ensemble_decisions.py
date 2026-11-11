@@ -43,17 +43,18 @@ MODEL_PREDICTION_FILES = {
     "logreg": "predictions/test_logreg_predictions.csv",
     "svm": "predictions/test_svm_predictions.csv",
     "deberta": "predictions/test_deberta_predictions.csv",
-    "qwen": "predictions/test_qwen2_5_14b_predictions.csv",
+    # "qwen": "predictions/test_qwen2_5_14b_eval_predictions.csv",
+    "modernbert": "predictions/test_modernbert_predictions.csv",   
 }
 
 # Model weights.
 # Start with equal weights. Later you can increase weights for stronger models.
-MODEL_WEIGHTS = {
-    "logreg": 1.0,
-    "svm": 1.0,
-    "deberta": 1.0,
-    "qwen": 1.0,
-}
+MODEL_WEIGHTS = {"logreg": 1.0, 
+                 "svm": 1.0, 
+                 "deberta": 1.0, 
+                #  "qwen": 1.0, ""
+                 "modernbert": 1.0
+                }
 
 # Ensemble threshold.
 #

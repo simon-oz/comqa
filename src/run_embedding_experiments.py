@@ -62,6 +62,10 @@ def parse_args(argv=None, *, default_classifiers=None):
     parser.add_argument("--deberta-checkpoint", type=Path, default=Path("deberta_large_multilabel/final"))
     parser.add_argument("--qwen-checkpoint", type=Path, default=Path("qwen2_5_14b_multilabel/final"),
                         help="Fine-tuned sequence-classification model or SEQ_CLS PEFT adapter")
+    parser.add_argument("--modernbert-model", default="answerdotai/ModernBERT-large")
+    parser.add_argument("--modernbert-checkpoint", type=Path,
+                    default=Path("modernbert_large_multilabel/final"),
+                    help="Fine-tuned ModernBERT sequence-classification checkpoint")
     parser.add_argument("--checkpoint-labels", nargs="+", choices=LABEL_COLS,
                         help="Training label order for checkpoints lacking named id2label metadata")
     parser.add_argument("--neural-batch-size", type=int, default=2)

@@ -76,6 +76,7 @@ SEED = 42
 ENABLE_LOGREG = True
 ENABLE_SVM = True
 ENABLE_DEBERTA = True
+ENABLE_MODERNBERT = True  # CHANGE: ModernBERT coverage for the legacy score ensemble
 ENABLE_QWEN = True
 
 LOGREG_MODEL_PATH = Path("artifacts/logreg_ovr.joblib")
@@ -85,6 +86,8 @@ SVM_MODEL_PATH = Path("artifacts/svm_ovr.joblib")
 SVM_SCALER_PATH = Path("artifacts/svm_scaler.joblib")
 
 DEBERTA_MODEL_DIR = Path("deberta_large_multilabel/final")
+# CHANGE: fine-tuned ModernBERT checkpoint consumed by the same SEQ_CLS loader path.
+MODERNBERT_MODEL_DIR = Path("modernbert_large_multilabel/final")
 
 QWEN_BASE_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 QWEN_ADAPTER_DIR = Path("qwen2_5_14b_multilabel/final")
@@ -123,6 +126,7 @@ MODEL_WEIGHTS = {
     "logreg": 1.0,
     "svm": 1.0,
     "deberta": 1.0,
+    "modernbert": 1.0,  # CHANGE: candidate weight for ModernBERT
     "qwen": 1.0,
 }
 
@@ -158,6 +162,7 @@ MIN_PRECISION_FLOOR = {
 
 # Neural inference settings.
 DEBERTA_BATCH_SIZE = 8
+MODERNBERT_BATCH_SIZE = 8  # CHANGE: ModernBERT is ~similar throughput class as DeBERTa-large
 QWEN_BATCH_SIZE = 2
 MAX_LENGTH = 512
 
@@ -911,6 +916,67 @@ def load_deberta_scores(dev_texts, test_texts):
     return dev_logits, test_logits
 
 
+# CHANGE: mirror of load_deberta_scores for the fine-tuned ModernBERT checkpoint.
+# ModernBERT is a standard HF SEQ_CLS model, so AutoModelForSequenceClassification
+# picks it up automatically (requires transformers >= 4.48). MAX_LENGTH stays 512
+# for apples-to-apples comparison with DeBERTa; ModernBERT's native 8K context is
+# exploited in the unified runner via --neural-max-length, not here.
+def load_modernbert_scores(dev_texts, test_texts):
+    if not MODERNBERT_MODEL_DIR.exists():
+        print(f"Skipping ModernBERT: model directory not found at {MODERNBERT_MODEL_DIR}")
+        return None
+
+    print(f"Loading ModernBERT from {MODERNBERT_MODEL_DIR}")
+
+    tokenizer = AutoTokenizer.from_pretrained(MODERNBERT_MODEL_DIR)
+
+    torch_dtype = torch.bfloat16 if cuda_bf16_supported() else torch.float32
+
+    try:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODERNBERT_MODEL_DIR,
+            dtype=torch_dtype,
+            device_map="auto",
+        )
+    except TypeError:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODERNBERT_MODEL_DIR,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+
+    model.eval()
+
+    print("Predicting ModernBERT dev logits...")
+    dev_logits = predict_logits(
+        model=model,
+        tokenizer=tokenizer,
+        texts=dev_texts,
+        batch_size=MODERNBERT_BATCH_SIZE,
+        max_length=MAX_LENGTH,
+        prompt_fn=None,
+    )
+
+    print("Predicting ModernBERT test logits...")
+    test_logits = predict_logits(
+        model=model,
+        tokenizer=tokenizer,
+        texts=test_texts,
+        batch_size=MODERNBERT_BATCH_SIZE,
+        max_length=MAX_LENGTH,
+        prompt_fn=None,
+    )
+
+    del model
+    del tokenizer
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return dev_logits, test_logits
+
+
 def build_qwen_text(question: str) -> str:
     return (
         "Classify the required task labels for the following tax/legal question. "
@@ -1192,6 +1258,20 @@ def main():
                 raw_dev_scores["deberta"] = dev_scores
                 raw_test_scores["deberta"] = test_scores
                 model_timing["deberta"] = float(model_elapsed_time)
+
+        # CHANGE: ModernBERT block, mirrors the DeBERTa block.
+        if ENABLE_MODERNBERT:
+            model_start_time = time.perf_counter()
+
+            scores = load_modernbert_scores(dev_texts, test_texts)
+
+            model_elapsed_time = time.perf_counter() - model_start_time
+
+            if scores is not None:
+                dev_scores, test_scores = scores
+                raw_dev_scores["modernbert"] = dev_scores
+                raw_test_scores["modernbert"] = test_scores
+                model_timing["modernbert"] = float(model_elapsed_time)
 
         # Qwen.
         if ENABLE_QWEN:
