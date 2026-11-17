@@ -19,8 +19,8 @@ from embedding_experiment_utils import LABEL_COLS
 # so that zero-shot routing (predict_mlm, cloze metadata, fixed thresholds) applies
 # to both DeBERTa and ModernBERT without duplicating `name == "deberta"` checks.
 NEURAL_CLASSIFIERS = (
-    "deberta", "modernbert", "qwen",
-    "deberta_finetuned", "modernbert_finetuned", "qwen_finetuned",
+    "deberta", "modernbert", "gemma", "llama",
+    "deberta_finetuned", "modernbert_finetuned",
 )
 # Bidirectional encoders routed through predict_mlm for zero-shot.
 MLM_CLASSIFIERS = frozenset(("deberta", "modernbert"))
@@ -98,6 +98,68 @@ def parse_qwen_labels(raw):
     if unknown:
         raise ValueError(f"Qwen returned unknown labels: {sorted(unknown)}")
     return np.array([int(label in labels) for label in LABEL_COLS], dtype=float)
+
+
+def parse_generative_labels(raw):
+    """Permissive parser for Gemma/Llama only. Drops unknown labels instead of raising.
+
+    Qwen uses the stricter `parse_qwen_labels`; this parser is for generative models
+    that paraphrase label names (e.g. Llama emits "compare" for "comparison"). An
+    unknown label becomes 0 rather than aborting the entire baseline.
+    """
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        lowered = text.lower()
+        found = set()
+        for label in LABEL_COLS:
+            for variant in (label, label.replace("_", " ")):
+                if re.search(rf"(?<![a-z0-9_]){re.escape(variant)}(?![a-z0-9_])", lowered):
+                    found.add(label)
+                    break
+        return np.array([int(label in found) for label in LABEL_COLS], dtype=float)
+
+    labels = obj.get("labels") if isinstance(obj, dict) else obj
+    if isinstance(labels, str):
+        labels = [labels]
+    if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels):
+        raise ValueError("Generative model must return a JSON object with a labels list")
+    normalized = {label.strip().lower().replace(" ", "_") for label in labels}
+    normalized &= set(LABEL_COLS)  # drop unknown labels instead of raising
+    return np.array([int(label in normalized) for label in LABEL_COLS], dtype=float)
+
+
+def predict_generative_generation(model, tokenizer, texts, args, raw_file, *,
+                                  max_prompt_length, max_new_tokens):
+    """Generic zero-shot generation for Gemma/Llama. Uses the permissive parser."""
+    import torch
+
+    predictions = []
+    with raw_file.open("w", encoding="utf-8") as stream:
+        for row, question in enumerate(texts):
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    qwen_messages(question), tokenize=False,
+                    add_generation_prompt=True, enable_thinking=False,
+                )
+            except TypeError:
+                prompt = tokenizer.apply_chat_template(
+                    qwen_messages(question), tokenize=False,
+                    add_generation_prompt=True,
+                )
+            inputs = tokenizer(prompt, return_tensors="pt", truncation=False)
+            if inputs["input_ids"].shape[1] > max_prompt_length:
+                raise ValueError(f"Row {row}: prompt exceeds max-prompt-length; increase the limit")
+            inputs = {key: value.to(model.device) for key, value in inputs.items()}
+            with torch.inference_mode():
+                generated = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens,
+                                           pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+            raw = tokenizer.decode(generated[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+            predictions.append(parse_generative_labels(raw))
+            stream.write(json.dumps({"source_row_in_split": row, "question": question, "response": raw}) + "\n")
+            stream.flush()
+    return np.vstack(predictions)
 
 
 def checkpoint_label_order(config, explicit_labels=None):
@@ -219,10 +281,11 @@ def score_neural(name, texts_by_split, args, output):
     source = {
         "deberta": args.deberta_model,
         "modernbert": args.modernbert_model,
-        "qwen": args.qwen_model,
+        "gemma": args.gemma_model,                # ADD
+        "llama": args.llama_model,                # ADD
         "deberta_finetuned": args.deberta_checkpoint,
         "modernbert_finetuned": args.modernbert_checkpoint,
-        "qwen_finetuned": args.qwen_checkpoint,
+        # "qwen_finetuned": args.qwen_checkpoint,
     }[name]
     if name.endswith("_finetuned") and not Path(source).is_dir():
         raise FileNotFoundError(f"{name} checkpoint not found: {source}")
@@ -246,7 +309,7 @@ def score_neural(name, texts_by_split, args, output):
             if not tokenizer_source:
                 raise ValueError("Adapter does not identify its base model for tokenizer loading")
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **common)
-        if name.startswith("qwen"):
+        if name.startswith("qwen") or name in ("gemma", "llama"):
             if tokenizer.pad_token_id is None:
                 tokenizer.pad_token = tokenizer.eos_token
             tokenizer.padding_side = "left"
@@ -285,7 +348,7 @@ def score_neural(name, texts_by_split, args, output):
             # CHANGE 3d: route via MLM_CLASSIFIERS instead of `name == "deberta"`.
             if name in MLM_CLASSIFIERS:
                 cls = AutoModelForMaskedLM
-            elif name == "qwen":
+            elif name == "qwen" or name in ("gemma", "llama"):
                 cls = AutoModelForCausalLM
             else:
                 cls = AutoModelForSequenceClassification
@@ -296,7 +359,7 @@ def score_neural(name, texts_by_split, args, output):
                 model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
                 model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
             ensure_loaded_weights(info)
-        if name.startswith("qwen"):
+        if name.startswith("qwen") or name in ("gemma", "llama"):
             model.config.pad_token_id = tokenizer.pad_token_id
         model.to(device).eval()
         metadata["revision"] = getattr(model.config, "_commit_hash", None)
@@ -318,6 +381,12 @@ def score_neural(name, texts_by_split, args, output):
         if name == "qwen":
             metadata.update(system_prompt=SYSTEM_PROMPT, label_definitions=LABEL_DEFINITIONS,
                             max_prompt_length=args.qwen_max_prompt_length, max_new_tokens=args.qwen_max_new_tokens)
+        elif name == "gemma":                                                   # ADD
+            metadata.update(system_prompt=SYSTEM_PROMPT, label_definitions=LABEL_DEFINITIONS,
+                            max_prompt_length=args.gemma_max_prompt_length, max_new_tokens=args.gemma_max_new_tokens)
+        elif name == "llama":                                                   # ADD
+            metadata.update(system_prompt=SYSTEM_PROMPT, label_definitions=LABEL_DEFINITIONS,
+                            max_prompt_length=args.llama_max_prompt_length, max_new_tokens=args.llama_max_new_tokens)
         if name == "qwen_finetuned":
             metadata["text_template"] = qwen_classification_text("{question}")
         timing = {"load_seconds": time.perf_counter() - started}
@@ -330,6 +399,16 @@ def score_neural(name, texts_by_split, args, output):
                 scores[split] = predict_mlm(model, tokenizer, texts, args)
             elif name == "qwen":
                 scores[split] = predict_qwen_generation(model, tokenizer, texts, args, output / f"{split}_raw.jsonl")
+            elif name in ("gemma", "llama"):                                                              # ADD
+                if name == "gemma":
+                    max_len = args.gemma_max_prompt_length
+                    max_new = args.gemma_max_new_tokens
+                else:
+                    max_len = args.llama_max_prompt_length
+                    max_new = args.llama_max_new_tokens
+                scores[split] = predict_generative_generation(
+                    model, tokenizer, texts, args, output / f"{split}_raw.jsonl",
+                    max_prompt_length=max_len, max_new_tokens=max_new)
             else:
                 scores[split] = predict_classification(model, tokenizer, texts, args,
                                                        qwen=name.startswith("qwen"), order=order)

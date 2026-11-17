@@ -73,6 +73,12 @@ def parse_args(argv=None, *, default_classifiers=None):
     parser.add_argument("--neural-dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--qwen-max-prompt-length", type=int, default=2048)
     parser.add_argument("--qwen-max-new-tokens", type=int, default=192)
+    parser.add_argument("--gemma-model", default="/data/models/meta/muse_glimmer30b") # google/gemma-4-31B-it
+    parser.add_argument("--llama-model", default="/data/models/meta/llama31-8b-it") # meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument("--gemma-max-prompt-length", type=int, default=2048)
+    parser.add_argument("--gemma-max-new-tokens", type=int, default=192)
+    parser.add_argument("--llama-max-prompt-length", type=int, default=2048)
+    parser.add_argument("--llama-max-new-tokens", type=int, default=192)
     parser.add_argument("--no-fusion", action="store_true", help="Evaluate text-only baselines and ensemble without pairwise fusion")
     parser.add_argument("--fusion-source", choices=["logreg", "svm"], default="logreg")
     parser.add_argument("--fusion-embedding-weight", type=float, default=0.5,
@@ -100,7 +106,10 @@ def parse_args(argv=None, *, default_classifiers=None):
         parser.error("--batch-size and --max-seq-length must be positive")
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be between 0 and 2**32 - 1")
-    if min(args.neural_batch_size, args.neural_max_length, args.qwen_max_prompt_length, args.qwen_max_new_tokens) < 1:
+    if min(args.neural_batch_size, args.neural_max_length,
+           args.qwen_max_prompt_length, args.qwen_max_new_tokens,
+           args.gemma_max_prompt_length, args.gemma_max_new_tokens,
+           args.llama_max_prompt_length, args.llama_max_new_tokens) < 1:
         parser.error("Neural batch size and token limits must be positive")
     if not 0 < args.fusion_embedding_weight < 1:
         parser.error("--fusion-embedding-weight must be strictly between 0 and 1")
@@ -360,7 +369,7 @@ def run(args, *, encoder=None, neural_scorer=None):
     """Scorer hooks support offline pipeline tests; the CLI uses real checkpoints."""
     if args.train is None:
         args.train = next((Path(path) for path in (
-            "data/train_dataset.txt", "train_dataset.txt", "data/train_dataset.jsonl", "train_dataset.jsonl",
+            "data/train_dataset.jsonl", "train_dataset.jsonl",
         ) if Path(path).is_file()), None)
     if args.train is None:
         raise FileNotFoundError("Training data not found. Pass --train /path/to/train_dataset.jsonl")
