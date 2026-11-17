@@ -135,6 +135,9 @@ def predict_generative_generation(model, tokenizer, texts, args, raw_file, *,
     """Generic zero-shot generation for Gemma/Llama. Uses the permissive parser."""
     import torch
 
+    # FIX: Safely get device for models loaded with device_map="auto"
+    model_device = next(model.parameters()).device
+
     predictions = []
     with raw_file.open("w", encoding="utf-8") as stream:
         for row, question in enumerate(texts):
@@ -151,7 +154,8 @@ def predict_generative_generation(model, tokenizer, texts, args, raw_file, *,
             inputs = tokenizer(prompt, return_tensors="pt", truncation=False)
             if inputs["input_ids"].shape[1] > max_prompt_length:
                 raise ValueError(f"Row {row}: prompt exceeds max-prompt-length; increase the limit")
-            inputs = {key: value.to(model.device) for key, value in inputs.items()}
+            
+            inputs = {key: value.to(model_device) for key, value in inputs.items()}
             with torch.inference_mode():
                 generated = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens,
                                            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
@@ -202,6 +206,8 @@ def checkpoint_metadata(source):
 
 def predict_classification(model, tokenizer, texts, args, *, qwen, order):
     import torch
+    # FIX: Safely get device
+    model_device = next(model.parameters()).device
 
     arrays = []
     for start in range(0, len(texts), args.neural_batch_size):
@@ -210,7 +216,7 @@ def predict_classification(model, tokenizer, texts, args, *, qwen, order):
             batch = [qwen_classification_text(text) for text in batch]
         inputs = tokenizer(batch, padding=True, truncation=True,
                            max_length=args.neural_max_length, return_tensors="pt")
-        inputs = {key: value.to(model.device) for key, value in inputs.items()}
+        inputs = {key: value.to(model_device) for key, value in inputs.items()}
         with torch.inference_mode():
             logits = model(**inputs).logits
             arrays.append(torch.sigmoid(logits.float()).cpu().numpy()[:, order])
@@ -220,6 +226,8 @@ def predict_classification(model, tokenizer, texts, args, *, qwen, order):
 def predict_mlm(model, tokenizer, texts, args):
     """Cloze proxy with full verbalizers; truncation always preserves task masks."""
     import torch
+    # FIX: Safely get device
+    model_device = next(model.parameters()).device
 
     if tokenizer.mask_token_id is None:
         raise ValueError("DeBERTa cloze evaluation requires a mask token")
@@ -235,7 +243,7 @@ def predict_mlm(model, tokenizer, texts, args):
         for start in range(0, len(prompts), args.neural_batch_size):
             batch = tokenizer(prompts[start:start + args.neural_batch_size], padding=True,
                               truncation=True, max_length=args.neural_max_length, return_tensors="pt")
-            batch = {key: value.to(model.device) for key, value in batch.items()}
+            batch = {key: value.to(model_device) for key, value in batch.items()}
             with torch.inference_mode():
                 logits = model(**batch).logits
                 for local_row, target in enumerate(targets[start:start + args.neural_batch_size]):
@@ -244,13 +252,15 @@ def predict_mlm(model, tokenizer, texts, args):
                         raise ValueError("Prediction masks were truncated; increase --neural-max-length")
                     # Ignore any mask tokens appearing inside the user's question.
                     selected = logits[local_row, positions[-len(target):]].float().log_softmax(dim=-1)
-                    scores.append(selected[torch.arange(len(target), device=model.device), target].mean())
+                    scores.append(selected[torch.arange(len(target), device=model_device), target].mean())
         rows.append(torch.softmax(torch.stack(scores), dim=0).cpu().numpy())
     return np.vstack(rows)
 
 
 def predict_qwen_generation(model, tokenizer, texts, args, raw_file):
     import torch
+    # FIX: Safely get device
+    model_device = next(model.parameters()).device
 
     predictions = []
     # Preserve every raw response, including the response that fails parsing.
@@ -260,7 +270,7 @@ def predict_qwen_generation(model, tokenizer, texts, args, raw_file):
             inputs = tokenizer(prompt, return_tensors="pt", truncation=False)
             if inputs["input_ids"].shape[1] > args.qwen_max_prompt_length:
                 raise ValueError(f"Qwen row {row}: prompt exceeds --qwen-max-prompt-length; increase the limit")
-            inputs = {key: value.to(model.device) for key, value in inputs.items()}
+            inputs = {key: value.to(model_device) for key, value in inputs.items()}
             with torch.inference_mode():
                 generated = model.generate(**inputs, do_sample=False, max_new_tokens=args.qwen_max_new_tokens,
                                            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
@@ -329,17 +339,24 @@ def score_neural(name, texts_by_split, args, output):
             if not head_keys or any(weights[key].shape[0] != len(LABEL_COLS) for key in head_keys):
                 raise ValueError("Qwen adapter is missing its trained 12-label score.weight classification head")
             del weights
-            # CHANGE 3c: fall back to torch_dtype= on transformers that predate `dtype=`.
+            
+            # FIX: Extract dtype to avoid duplicates and ensure smooth loading
+            load_dtype = model_kwargs.pop("dtype", None) or model_kwargs.pop("torch_dtype", None)
+            load_kwargs = {"output_loading_info": True}
+            if load_dtype is not None:
+                load_kwargs["dtype"] = load_dtype
+                
             try:
                 base_model, info = AutoModelForSequenceClassification.from_pretrained(
                     base_source, num_labels=len(LABEL_COLS), problem_type="multi_label_classification",
-                    output_loading_info=True, **model_kwargs,
+                    **load_kwargs, **model_kwargs
                 )
             except TypeError:
-                model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
+                if "dtype" in load_kwargs:
+                    load_kwargs["torch_dtype"] = load_kwargs.pop("dtype")
                 base_model, info = AutoModelForSequenceClassification.from_pretrained(
                     base_source, num_labels=len(LABEL_COLS), problem_type="multi_label_classification",
-                    output_loading_info=True, **model_kwargs,
+                    **load_kwargs, **model_kwargs
                 )
             ensure_loaded_weights(info, allowed_missing=("score.weight",))
             model = PeftModel.from_pretrained(base_model, str(source), **common)
@@ -352,16 +369,39 @@ def score_neural(name, texts_by_split, args, output):
                 cls = AutoModelForCausalLM
             else:
                 cls = AutoModelForSequenceClassification
-            # CHANGE 3c: same dtype fallback as above.
+                
+            # FIX: Extract dtype from model_kwargs to avoid duplicate keyword arguments
+            load_dtype = model_kwargs.pop("dtype", None) or model_kwargs.pop("torch_dtype", None)
+            
+            load_kwargs = {
+                "output_loading_info": True,
+                "trust_remote_code": True,
+            }
+            # FIX: Use device_map="auto" for large generative models to prevent OOM during .to(device)
+            if name in ("qwen", "gemma", "llama"):
+                load_kwargs["device_map"] = "auto"
+                
+            if load_dtype is not None:
+                load_kwargs["dtype"] = load_dtype
+
+            # FIX: Ensure robust loading with correct dtype parameter
             try:
-                model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
+                model, info = cls.from_pretrained(source, **load_kwargs, **model_kwargs)
             except TypeError:
-                model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
-                model, info = cls.from_pretrained(source, output_loading_info=True, **model_kwargs)
+                # Fallback for older transformers versions that require torch_dtype instead of dtype
+                if "dtype" in load_kwargs:
+                    load_kwargs["torch_dtype"] = load_kwargs.pop("dtype")
+                model, info = cls.from_pretrained(source, **load_kwargs, **model_kwargs)
             ensure_loaded_weights(info)
+            
         if name.startswith("qwen") or name in ("gemma", "llama"):
             model.config.pad_token_id = tokenizer.pad_token_id
-        model.to(device).eval()
+            
+        model.eval()
+        # FIX: Only move to device if device_map="auto" was not used
+        if not getattr(model, "hf_device_map", None):
+            model.to(device)
+            
         metadata["revision"] = getattr(model.config, "_commit_hash", None)
         # CHANGE 3d: use MLM_CLASSIFIERS so ModernBERT inherits the cloze metadata.
         if name.endswith("_finetuned"):

@@ -73,7 +73,7 @@ def parse_args(argv=None, *, default_classifiers=None):
     parser.add_argument("--neural-dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--qwen-max-prompt-length", type=int, default=2048)
     parser.add_argument("--qwen-max-new-tokens", type=int, default=192)
-    parser.add_argument("--gemma-model", default="/data/models/meta/muse_glimmer30b") # google/gemma-4-31B-it
+    parser.add_argument("--gemma-model", default="/data/models/google/gemma-4-31B-it") # google/gemma-4-31B-it
     parser.add_argument("--llama-model", default="/data/models/meta/llama31-8b-it") # meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument("--gemma-max-prompt-length", type=int, default=2048)
     parser.add_argument("--gemma-max-new-tokens", type=int, default=192)
